@@ -286,10 +286,10 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self.send_error(404, "File not found")
         
-        elif self.path == '/home1':
+        elif self.path == '/home':
             # Serve home.html
             try:
-                with open('home1.html', 'rb') as f:
+                with open('home.html', 'rb') as f:
                     content = f.read()
                 self.send_response(200)
                 self.send_header('Content-type', 'text/html')
