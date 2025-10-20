@@ -5,11 +5,10 @@ RUN apt-get update && apt-get install -y \
     wget \
     unzip \
     curl \
+    gnupg \
     libnss3 \
-    libgconf-2-4 \
     libxss1 \
-    libappindicator3-1 \
-    libindicator7 \
+    libayatana-appindicator3-1 \
     fonts-liberation \
     libasound2 \
     libnspr4 \
@@ -30,9 +29,9 @@ RUN apt-get update && apt-get install -y \
     libatspi2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Google Chrome (undetected_chromedriver will use this)
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
+# Install Google Chrome (using modern keyring method)
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list \
     && apt-get update \
     && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
