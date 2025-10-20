@@ -43,23 +43,29 @@ class TelegramAutomation:
         self.driver = None
         self.setup_driver()
         self.current_status = "Ready"
-    
+        
     def setup_driver(self):
         """Configure and initialize the WebDriver"""
         chrome_options = uc.ChromeOptions()
-        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--headless=new')  # Use new headless mode for better compatibility
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-software-rasterizer')  # Helps with rendering issues in containers
+        chrome_options.add_argument('--remote-debugging-port=9222')  # For debugging if needed
         chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36')
 
         try:
-            self.driver = uc.Chrome(options=chrome_options)
+            # Explicitly set the browser executable path for Docker/Render compatibility
+            self.driver = uc.Chrome(
+                options=chrome_options,
+                browser_executable_path='/usr/bin/google-chrome-stable',
+                use_subprocess=True  # Helps with process management in containers
+            )
             print("WebDriver initialized successfully")
         except Exception as e:
             print(f"Failed to initialize WebDriver: {e}")
             raise
-
     def login_with_phone(self, country_code, phone_number):
         """Perform Telegram login with phone number"""
         try:
