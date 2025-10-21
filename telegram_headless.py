@@ -30,6 +30,9 @@ phone_received = threading.Event()
 sessions = {}
 queue_lock = threading.Lock()
 
+job_queue = deque()
+queue_lock = threading.Lock()
+
 LOGIN_TIMEOUT = int(os.environ.get('LOGIN_TIMEOUT', 120))         # time allowed for initial phone->code step
 CODE_WAIT = int(os.environ.get('CODE_WAIT', 300))                # max time to wait for user to submit code
 CODE_ENTRY_TIMEOUT = int(os.environ.get('CODE_ENTRY_TIMEOUT', 60))
