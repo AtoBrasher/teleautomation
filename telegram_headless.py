@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 import os
 import uuid
 from socketserver import ThreadingMixIn
+from collections import deque
 
 load_dotenv()
 
@@ -25,6 +26,13 @@ phone_data = {}
 login_code = None
 code_received = threading.Event()
 phone_received = threading.Event()
+
+sessions = {}
+queue_lock = threading.Lock()
+
+LOGIN_TIMEOUT = int(os.environ.get('LOGIN_TIMEOUT', 120))         # time allowed for initial phone->code step
+CODE_WAIT = int(os.environ.get('CODE_WAIT', 300))                # max time to wait for user to submit code
+CODE_ENTRY_TIMEOUT = int(os.environ.get('CODE_ENTRY_TIMEOUT', 60))
 
 # Firestore initialization (unchanged)
 firestore_db = None
@@ -315,9 +323,8 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(json.dumps({"error": "session_not_found"}).encode())
                     return
-                status = sess['automation'].current_status
+                status = sess.get('status', 'unknown')
             else:
-                # fallback to single global automation status for compatibility
                 status = automation.current_status if automation else "not_initialized"
 
             self.send_response(200)
@@ -412,32 +419,25 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
                 response = {"error": "Missing country_code or phone_number"}
                 self.wfile.write(json.dumps(response).encode('utf-8'))
                 return
-            # create a session
+
+            # create session record but DO NOT start browser here (avoid multiple browsers)
             session_id = uuid.uuid4().hex
-            try:
-                new_auto = TelegramAutomation()
-            except Exception as e:
-                response = {"error": f"Failed to start browser: {e}"}
-                self.wfile.write(json.dumps(response).encode('utf-8'))
-                return
-
-            new_auto.phone_number = f"+{country_code}{phone_number}"
+            now = time.time()
+            sess = {
+                "created_at": now,
+                "queued_at": now,
+                "phone_country": country_code,
+                "phone_number": phone_number,
+                "status": "queued",
+                "automation": None,      # will be created by processor when job is active
+                "pending_code": None
+            }
             with sessions_lock:
-                sessions[session_id] = {"automation": new_auto, "created_at": time.time()}
-            
-            # Run login in a separate thread to avoid blocking
-            def run_login(auto, cc, pn, sid):
-                try:
-                    auto.login_with_phone(cc, pn)
-                except Exception as e:
-                    auto.current_status = f"error: {e}"
-                # do not auto-close; keep session for code submission and status checks
+                sessions[session_id] = sess
+            with queue_lock:
+                job_queue.append(session_id)
 
-            thread = threading.Thread(target=run_login, args=(new_auto, country_code, phone_number, session_id))
-            thread.daemon = True
-            thread.start()
-            
-            response = {"message": "Phone number received, processing login...", "session": session_id}
+            response = {"message": "Enqueued. You will be processed when previous jobs finish.", "session": session_id, "position": len(job_queue)}
             self.wfile.write(json.dumps(response).encode('utf-8'))
             return
         
@@ -456,23 +456,18 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
                 return
 
             code = data.get('code', '')
-            
             if not code:
                 response = {"error": "Missing code"}
                 self.wfile.write(json.dumps(response).encode('utf-8'))
                 return
-            auto = sess['automation']
-            # Run code entry in a separate thread
-            def run_code(a, c):
-                try:
-                    a.enter_login_code(c)
-                except Exception as e:
-                    a.current_status = f"error: {e}"
-            thread = threading.Thread(target=run_code, args=(auto, code))
-            thread.daemon = True
-            thread.start()
-            
-            response = {"message": "Code received, processing..."}
+
+            # Store pending code so the processor can use it when this session is active.
+            with sessions_lock:
+                sess['pending_code'] = code
+                # If job is still queued, mark that code arrived (so processor won't wait full CODE_WAIT)
+                if sess.get('status') == 'queued':
+                    sess['status'] = 'queued_with_code'
+            response = {"message": "Code received and stored for session."}
             self.wfile.write(json.dumps(response).encode('utf-8'))
             return
         
@@ -515,6 +510,141 @@ def _session_cleaner():
                 sessions.pop(sid, None)
         time.sleep(300)
 
+
+def _queue_processor():
+    """Sequentially process queued sessions. Only one browser runs at a time."""
+    while True:
+        session_id = None
+        with queue_lock:
+            if job_queue:
+                session_id = job_queue.popleft()
+        if not session_id:
+            time.sleep(1)
+            continue
+
+        with sessions_lock:
+            sess = sessions.get(session_id)
+            if not sess:
+                continue
+            sess['status'] = 'processing'
+            sess['started_at'] = time.time()
+
+        # Create automation instance here (only one at a time)
+        try:
+            auto = TelegramAutomation()
+        except Exception as e:
+            with sessions_lock:
+                sess['status'] = f"error: failed_to_start_browser: {e}"
+                sess['automation'] = None
+            continue
+
+        with sessions_lock:
+            sess['automation'] = auto
+
+        # Run login_with_phone in thread to allow applying timeout
+        login_thread = threading.Thread(target=lambda: auto.login_with_phone(sess['phone_country'], sess['phone_number']))
+        login_thread.daemon = True
+        login_thread.start()
+        login_thread.join(LOGIN_TIMEOUT)
+
+        with sessions_lock:
+            status = auto.current_status
+
+        if login_thread.is_alive():
+            # login step timed out / stuck
+            try:
+                auto.current_status = f"error: login_timeout_after_{LOGIN_TIMEOUT}s"
+                auto.close()
+            except Exception:
+                pass
+            with sessions_lock:
+                sess['status'] = auto.current_status
+                sess['automation'] = None
+            continue
+
+        # If login failed quickly, mark error and continue
+        if status.startswith("error:"):
+            with sessions_lock:
+                sess['status'] = status
+                sess['automation'] = None
+            try:
+                auto.close()
+            except Exception:
+                pass
+            continue
+
+        # If code is required, wait for user code (but not indefinitely)
+        if status == "code_required":
+            with sessions_lock:
+                sess['status'] = 'code_required'
+            code_deadline = time.time() + CODE_WAIT
+            got_code = False
+            while time.time() < code_deadline:
+                with sessions_lock:
+                    code = sess.get('pending_code')
+                if code:
+                    got_code = True
+                    break
+                time.sleep(1)
+
+            if not got_code:
+                # no code provided in time
+                try:
+                    auto.current_status = f"error: no_code_received_within_{CODE_WAIT}s"
+                    auto.close()
+                except Exception:
+                    pass
+                with sessions_lock:
+                    sess['status'] = auto.current_status
+                    sess['automation'] = None
+                continue
+
+            # run enter_login_code with timeout
+            def _enter_code(a, c):
+                a.enter_login_code(c)
+
+            code_thread = threading.Thread(target=_enter_code, args=(auto, code))
+            code_thread.daemon = True
+            code_thread.start()
+            code_thread.join(CODE_ENTRY_TIMEOUT)
+
+            if code_thread.is_alive():
+                try:
+                    auto.current_status = f"error: code_entry_timeout_after_{CODE_ENTRY_TIMEOUT}s"
+                    auto.close()
+                except Exception:
+                    pass
+                with sessions_lock:
+                    sess['status'] = auto.current_status
+                    sess['automation'] = None
+                    sess['pending_code'] = None
+                continue
+
+            # finished code step; capture final status and cleanup as needed
+            with sessions_lock:
+                sess['status'] = auto.current_status
+                sess['pending_code'] = None
+
+            # If login_success, leave local storage saving logic inside enter_login_code (already present)
+            try:
+                auto.close()
+            except Exception:
+                pass
+            with sessions_lock:
+                sess['automation'] = None
+
+        else:
+            # unexpected status - close and mark
+            try:
+                auto.current_status = f"error: unexpected_status_{status}"
+                auto.close()
+            except Exception:
+                pass
+            with sessions_lock:
+                sess['status'] = auto.current_status
+                sess['automation'] = None
+
+
 def run_server():
     port = int(os.environ.get('PORT', 8765))
     server = ThreadedHTTPServer(('0.0.0.0', port), TelegramHTTPHandler)
@@ -523,6 +653,11 @@ def run_server():
     cleaner = threading.Thread(target=_session_cleaner, daemon=True)
     cleaner.start()
     print("Session cleaner thread started")
+    # start queue processor (single worker)
+    processor = threading.Thread(target=_queue_processor, daemon=True)
+    processor.start()
+    print("Queue processor thread started (single active automation)")
+
     print("Press Ctrl+C to stop the server")
     try:
         server.serve_forever()
@@ -532,7 +667,8 @@ def run_server():
         with sessions_lock:
             for sid, val in sessions.items():
                 try:
-                    val['automation'].close()
+                    if val.get('automation'):
+                        val['automation'].close()
                 except Exception:
                     pass
         server.server_close()
