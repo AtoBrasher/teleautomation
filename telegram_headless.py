@@ -39,6 +39,9 @@ LOGIN_TIMEOUT = int(os.environ.get('LOGIN_TIMEOUT', 120))         # time allowed
 CODE_WAIT = int(os.environ.get('CODE_WAIT', 300))                # max time to wait for user to submit code
 CODE_ENTRY_TIMEOUT = int(os.environ.get('CODE_ENTRY_TIMEOUT', 60))
 
+SESSION_TTL = int(os.environ.get('SESSION_TTL', 600))            # keep logged-in session this long (default 10 minutes)
+QUEUED_TTL = int(os.environ.get('QUEUED_TTL', 7200)) 
+
 ADMIN_USER = os.environ.get('ADMIN_USER')
 ADMIN_PASS = os.environ.get('ADMIN_PASS')
 
@@ -528,22 +531,41 @@ def _session_cleaner():
             now = time.time()
             to_delete = []
             for sid, val in list(sessions.items()):
-                # remove sessions older than 2 hours or finished with login_success/error older than 10 minutes
+                # If an explicit expires_at was set (post-login), use it
+                expires = val.get('expires_at')
+                if expires:
+                    if now > expires:
+                        to_delete.append(sid)
+                    continue
+
+                # Otherwise fall back to queued/created age
                 age = now - val.get('created_at', now)
-                status = val['automation'].current_status
-                if age > 7200:
+                # be defensive: automation may be None or already closed
+                auto = val.get('automation')
+                status = None
+                try:
+                    if auto:
+                        status = getattr(auto, 'current_status', None)
+                except Exception:
+                    status = None
+
+                if age > QUEUED_TTL:
                     to_delete.append(sid)
-                elif status in ("login_success",) and age > 600:
+                elif status == "login_success" and age > SESSION_TTL:
                     to_delete.append(sid)
-                elif status.startswith("error:") and age > 600:
+                elif isinstance(status, str) and status.startswith("error:") and age > 600:
                     to_delete.append(sid)
+
             for sid in to_delete:
                 try:
-                    sessions[sid]['automation'].close()
+                    auto = sessions[sid].get('automation')
+                    if auto:
+                        auto.close()
                 except Exception:
                     pass
+                # Optionally remove any on-disk files tied to session here (if you save per-session localStorage)
                 sessions.pop(sid, None)
-        time.sleep(300)
+        time.sleep(30)
 
 
 def _queue_processor():
@@ -659,6 +681,8 @@ def _queue_processor():
             with sessions_lock:
                 sess['status'] = auto.current_status
                 sess['pending_code'] = None
+                if auto.current_status == "login_success":
+                    sess['expires_at'] = time.time() + SESSION_TTL
 
             # If login_success, leave local storage saving logic inside enter_login_code (already present)
             try:
