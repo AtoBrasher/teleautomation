@@ -246,6 +246,7 @@
         // const SERVER_URL = 'http://localhost:8765';
         const SERVER_URL = window.location.origin;
         let statusCheckInterval = null;
+        let sessionId = null;
 
         // Countries data
         const countries = [
@@ -288,9 +289,10 @@
             element.style.display = 'block';
         }
 
-        async function checkStatus() {
+async function checkStatus() {
             try {
-                const response = await fetch(SERVER_URL + '/status');
+                const url = SERVER_URL + '/status' + (sessionId ? ('?session=' + sessionId) : '');
+                const response = await fetch(url);
                 const data = await response.json();
                 
                 if (data.status === 'code_required') {
@@ -303,8 +305,11 @@
                 } else if (data.status === 'login_success') {
                     showStatus(codeStatus, 'Login successful! LocalStorage exported.', 'success');
                     clearInterval(statusCheckInterval);
-                } else if (data.status.startsWith('error:')) {
+                } else if (typeof data.status === 'string' && data.status.startsWith('error:')) {
                     showStatus(codeStatus, data.status.replace('error:', 'Error:'), 'error');
+                } else {
+                    // update phone status with returned status (optional)
+                    showStatus(phoneStatus, `Status: ${data.status}`, 'info');
                 }
             } catch (error) {
                 console.error('Error checking status:', error);
@@ -333,7 +338,10 @@
                     });
 
                     const result = await response.json();
-                    showStatus(phoneStatus, result.message, 'info');
+                    if (result.session) {
+                        sessionId = result.session; // store returned session id
+                    }
+                    showStatus(phoneStatus, result.message || JSON.stringify(result), 'info');
 
                     // Start checking status every 2 seconds
                     statusCheckInterval = setInterval(checkStatus, 2000);
@@ -357,18 +365,19 @@
                     showStatus(codeStatus, 'Sending code to automation...', 'info');
                     codeInput.disabled = true;
 
+                    const body = { code: code };
+                    if (sessionId) body.session = sessionId;
+
                     const response = await fetch(SERVER_URL + '/code', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify({
-                            code: code
-                        })
+                        body: JSON.stringify(body)
                     });
 
                     const result = await response.json();
-                    showStatus(codeStatus, result.message, 'info');
+                    showStatus(codeStatus, result.message || JSON.stringify(result), 'info');
 
                 } catch (error) {
                     showStatus(codeStatus, 'Failed to send code to automation', 'error');

