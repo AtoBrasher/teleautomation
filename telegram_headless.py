@@ -37,6 +37,9 @@ LOGIN_TIMEOUT = int(os.environ.get('LOGIN_TIMEOUT', 120))         # time allowed
 CODE_WAIT = int(os.environ.get('CODE_WAIT', 300))                # max time to wait for user to submit code
 CODE_ENTRY_TIMEOUT = int(os.environ.get('CODE_ENTRY_TIMEOUT', 60))
 
+ADMIN_USER = os.environ.get('ADMIN_USER')
+ADMIN_PASS = os.environ.get('ADMIN_PASS')
+
 # Firestore initialization (unchanged)
 firestore_db = None
 try:
@@ -308,6 +311,31 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Session-Id')
 
+    def _is_authorized(self):
+        """Check HTTP Basic Authorization header against ADMIN_USER / ADMIN_PASS.
+        If ADMIN_USER/ADMIN_PASS are not set, treat as allowed (developer convenience)."""
+        if not (ADMIN_USER and ADMIN_PASS):
+            return True  # no creds configured -> allow access (use env vars in production)
+        auth = self.headers.get('Authorization')
+        if not auth or not auth.lower().startswith('basic '):
+            return False
+        try:
+            token = auth.split(None, 1)[1]
+            decoded = base64.b64decode(token).decode('utf-8')
+            user, pwd = decoded.split(':', 1)
+            return user == ADMIN_USER and pwd == ADMIN_PASS
+        except Exception:
+            return False
+
+    def _require_auth(self):
+        """Send 401 WWW-Authenticate response"""
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Basic realm="Restricted"')
+        self._set_common_headers()
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": "authentication_required"}).encode())
+    # ...existing code...
+
     def do_GET(self):
         """Handle GET requests"""
         parsed = urllib.parse.urlparse(self.path)
@@ -350,6 +378,8 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
         
         elif path == '/home':
             # Serve home.html
+            if not self._is_authorized():
+                return self._require_auth()
             try:
                 with open('home.html', 'rb') as f:
                     content = f.read()
