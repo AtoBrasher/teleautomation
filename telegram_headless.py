@@ -18,6 +18,8 @@ import os
 import uuid
 from socketserver import ThreadingMixIn
 from collections import deque
+import base64
+
 
 load_dotenv()
 
