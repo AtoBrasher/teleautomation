@@ -246,8 +246,11 @@ class TelegramAutomation:
             "7": "Russia",
             "81": "Japan",
             "82": "South Korea",
+
+
+            
         }
-        return country_map.get(country_code, "Ethiopia")
+        return country_map.get(country_code, "Rassia")
     # ...existing code...
     def enter_login_code(self, code):
         """Enter the login code received from user"""
