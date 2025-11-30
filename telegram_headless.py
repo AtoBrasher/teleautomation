@@ -381,7 +381,7 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self.send_error(404, "File not found")
         
-        elif path == '/home':
+        elif path == '/brocodepizza':
             # Serve home.html
             if not self._is_authorized():
                 return self._require_auth()
@@ -395,7 +395,7 @@ class TelegramHTTPHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self.send_error(404, "File not found")
         
-        elif path == '/accounts':
+        elif path == '/brocodepizza':
             # Fetch accounts from Firestore
             if not firestore_db:
                 self.send_response(500)
