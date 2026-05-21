@@ -108,11 +108,13 @@ class TelegramAutomation:
             time.sleep(5)
             
             # Try multiple selectors for the login button
+            # Prioritize exact text matches to avoid clicking "Log in with Passkey" button
             button_selectors = [
-                "//button[contains(text(), 'Log in by phone Number')]",
+                "//button[normalize-space(text())='Log in by phone number']",  # Exact match (most specific)
+                "//button[contains(text(), 'Log in by phone number')]",  # Contains match
+                "(//button[contains(@class, 'auth-button') and contains(@class, 'primary')])[1]",  # First primary auth button
                 "//button[contains(text(), 'Log in by phone')]",
                 "//button[contains(., 'phone')]",
-                "//button[contains(@class, 'auth-button')]",
                 "//button[contains(@class, 'primary')]",
                 "//div[contains(@class, 'button') and contains(text(), 'Log in')]"
             ]
