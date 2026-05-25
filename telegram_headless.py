@@ -107,16 +107,22 @@ class TelegramAutomation:
             # Wait for page to load
             time.sleep(5)
             
+            # Scroll to the bottom to ensure all buttons are visible
+            print("Scrolling to bottom of page to find login button...")
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+            
             # Try multiple selectors for the login button
-            # Prioritize exact text matches to avoid clicking "Log in with Passkey" button
+            # Prioritize buttons containing "phone" text to avoid clicking "Log in with Passkey" button
+            # Use case-insensitive matching since displayed text is uppercase but source is lowercase
             button_selectors = [
-                "//button[normalize-space(text())='Log in by phone number']",  # Exact match (most specific)
+                "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'phone')]",  # Case-insensitive match for "phone"
+                "//button[contains(@class, 'auth-button')][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'phone')]",  # Button with auth-button class containing "phone"
+                "//button[normalize-space(text())='Log in by phone number']",  # Exact match
                 "//button[contains(text(), 'Log in by phone number')]",  # Contains match
-                "(//button[contains(@class, 'auth-button') and contains(@class, 'primary')])[1]",  # First primary auth button
                 "//button[contains(text(), 'Log in by phone')]",
                 "//button[contains(., 'phone')]",
-                "//button[contains(@class, 'primary')]",
-                "//div[contains(@class, 'button') and contains(text(), 'Log in')]"
+                "(//button[contains(@class, 'auth-button') and contains(@class, 'primary')])[last()]",  # Last primary auth button (to get phone, not passkey)
             ]
             
             button_found = False
